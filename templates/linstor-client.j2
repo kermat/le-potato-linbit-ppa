@@ -1,0 +1,2 @@
+[global]
+controllers={% for node in groups['potato'] %}{{ hostvars[node]['ansible_all_ipv4_addresses'] | first }}{% if not loop.last %},{% endif %}{% endfor %}

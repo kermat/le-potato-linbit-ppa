@@ -1,0 +1,93 @@
+---
+- hosts: potato
+  become: true
+  tasks:
+  - name: install packages for www demo
+    apt:
+      name:
+        - apache2
+      update_cache: yes
+      state: present
+    register: www_installed
+
+  - name: disable apache2
+    systemd:
+      name: apache2
+      state: stopped
+      enabled: no
+    when: www_installed.changed
+
+  - name: check for linstor_storage_pool device
+    stat:
+      path: "{{ linstor_storage_pool }}"
+    register: linstor_sp_dev
+
+  - name: wipefs linstor_storage_pool device
+    shell: wipefs -afq {{ linstor_storage_pool }}
+    when: linstor_sp_dev.stat.islnk is defined
+
+  - name: prepare physical storage
+    shell: linstor physical-storage create-device-pool --pool-name drbdpool LVMTHIN {{ ansible_nodename }} {{ linstor_storage_pool }}
+    when: linstor_sp_dev.stat.islnk is defined
+    register: storage_sp_dev_create
+    failed_when: ( storage_sp_dev_create.rc not in [0,10] )
+
+  - name: create lvm-thin storage pool
+    shell: linstor storage-pool create lvmthin {{ ansible_nodename }} lvm-thin linstor_drbdpool/drbdpool
+    when: linstor_sp_dev.stat.islnk is defined
+    register: storage_pool_create
+    failed_when: ( storage_pool_create.rc not in [0,10] )
+
+  - name: create resource group
+    shell: linstor resource-group create rg0 --storage-pool lvm-thin --place-count 2
+    run_once: true
+    register: rg_create
+    failed_when: ( rg_create.rc not in [0,10] )
+
+  - name: create volume group
+    shell: linstor volume-group create rg0
+    run_once: true
+    register: vg_create
+    failed_when: ( vg_create.rc not in [0,10] )
+
+  - name: create resource
+    shell: linstor resource-group spawn rg0 res00 1G
+    run_once: true
+    register: res_create
+    failed_when: ( res_create.rc not in [0,10] )
+
+  - name: create ext4 fs on new resource
+    filesystem: 
+      fstype: ext4
+      dev: /dev/drbd1000
+    run_once: true
+    when: res_create.changed
+
+  - name: create /etc/drbd-reactor.d if it does not exist
+    file:
+      path: /etc/drbd-reactor.d
+      state: directory
+      mode: '0755'
+
+  - name: create www demo promoter resource
+    template:
+      src: drbd-reactor-www.j2
+      dest: /etc/drbd-reactor.d/res00_www.toml
+    register: drbd_reactor_configured
+
+  - name: restart drbd-reactor.service
+    systemd:
+      name: drbd-reactor
+      state: restarted
+    when: drbd_reactor_configured.changed
+
+  - name: check for mounted filesystem
+    shell: df | grep -q "drbd1000"
+    register: drbd1000_mounted
+    failed_when: ( drbd1000_mounted.rc not in [0,1] )
+
+  - name: copy wwww on active node
+    template:
+      src: index.j2
+      dest: /var/www/html/demo/index.html
+    when: drbd1000_mounted.rc == 0

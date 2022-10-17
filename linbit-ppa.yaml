@@ -1,0 +1,98 @@
+---
+- hosts: potato
+  become: true
+  tasks:
+  - name: set hostname
+    hostname:
+      name: "{{ inventory_hostname }}"
+
+  - name: preserve hostname in cloud-init
+    lineinfile:
+      path: /etc/cloud/cloud.cfg
+      regexp: '^preserve_hostname:'
+      line: "preserve_hostname: true"
+
+  - name: dist upgrade
+    apt:
+      upgrade: dist
+      update_cache: yes
+
+  - name: update packages
+    apt:
+      name: "*"
+      state: latest
+      update_cache: yes
+    register: updates
+
+  - name: check for reboot required
+    stat:
+      path: /var/run/reboot-required
+    register: reboot_required
+  
+  - name: reboot if kernel updated
+    reboot:
+    when: reboot_required.stat.exists == true
+
+  - name: add LINBIT PPA for DRBD packages
+    apt_repository:
+      repo: ppa:linbit/linbit-drbd9-stack
+      state: present
+
+  - name: install packages
+    apt:
+      name:
+        - drbd-dkms
+        - drbd-reactor
+        - drbd-utils
+        - linstor-satellite
+        - linstor-controller
+        - linstor-client
+        - python-linstor
+        - thin-provisioning-tools
+        - cryptsetup
+        - resource-agents-base
+        - resource-agents-extra
+        - git
+      update_cache: yes
+      state: latest
+
+  - name: restart multipathd after adding drbd blacklist (from drbd-utils)
+    systemd: 
+      name: multipathd
+      state: restarted
+
+  - name: enable linstor-controller on first potato
+    systemd:
+      name: linstor-controller
+      state: started
+      enabled: yes
+    when: inventory_hostname == groups['potato'][0]
+
+  - name: enable linstor-satellite on all potato
+    systemd:
+      name: linstor-satellite
+      state: started
+      enabled: yes
+
+  - name: create /etc/linstor if it does not exist
+    file:
+      path: /etc/linstor
+      state: directory
+      mode: '0755'
+
+  - name: setup linstor-client.conf
+    template:
+      src: linstor-client.j2
+      dest: /etc/linstor/linstor-client.conf
+
+  - name: initialize linstor controller
+    shell: linstor node create {{ ansible_nodename }} {{ ansible_all_ipv4_addresses | first }} --node-type Combined
+    when: inventory_hostname == groups['potato'][0]
+    register: linstor_ctrl_create
+    failed_when: ( linstor_ctrl_create.rc not in [0,10] )
+
+  - name: initialize linstor satellites
+    shell: linstor node create {{ ansible_nodename }} {{ ansible_all_ipv4_addresses | first }} --node-type Satellite
+    when: inventory_hostname != groups['potato'][0]
+    register: linstor_sat_create
+    failed_when: ( linstor_sat_create.rc not in [0,10] )

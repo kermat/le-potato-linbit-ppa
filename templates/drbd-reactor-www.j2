@@ -1,0 +1,12 @@
+[[promoter]]
+id = "www-demo"
+[promoter.resources.res00]
+dependencies-as = "Requires"
+target-as = "Requires"
+start = [
+         "ocf:heartbeat:Filesystem www_fs device=/dev/drbd1000 directory=/var/www/html/demo fstype=ext4 run_fsck=no",
+         "apache2.service",
+         "ocf:heartbeat:IPaddr2 www_vip ip={{ drbd_reactor_vip }}"
+        ]
+on-drbd-demote-failure = "reboot"
+secondary-force = true
