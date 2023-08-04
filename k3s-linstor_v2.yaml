@@ -1,0 +1,137 @@
+---
+- hosts: potato
+  become: true
+  tasks:
+  - name: set hostname
+    hostname:
+      name: "{{ inventory_hostname }}"
+
+  - name: preserve hostname in cloud-init
+    lineinfile:
+      path: /etc/cloud/cloud.cfg
+      regexp: '^preserve_hostname:'
+      line: "preserve_hostname: true"
+
+  - name: dist upgrade
+    apt:
+      upgrade: dist
+      update_cache: yes
+
+  - name: update packages
+    apt:
+      name: "*"
+      state: latest
+      update_cache: yes
+    register: updates
+
+  - name: check for reboot required
+    stat:
+      path: /var/run/reboot-required
+    register: reboot_required
+ 
+  - name: reboot if kernel updated
+    reboot:
+    when: reboot_required.stat.exists == true
+
+  - name: install build tools
+    apt:
+      name:
+        - linux-headers-generic
+        - build-essential
+      update_cache: yes
+      state: latest
+
+  - name: add .bashrc with kube stuff
+    template:
+      src: bashrc
+      dest: /root/.bashrc
+      mode: 0644
+
+- hosts: potato[0]
+  become: true
+  tasks:
+  - name: initialize k3s cluster
+    shell: "curl -sfL https://get.k3s.io | K3S_TOKEN='SECRET' INSTALL_K3S_EXEC='server' sh -s - --disable traefik --disable servicelb --cluster-init"
+    args:
+      warn: false
+
+- hosts: potato[1:]
+  become: true
+  tasks:
+  - name: join k3s cluster
+    shell: "curl -sfL https://get.k3s.io | K3S_TOKEN='SECRET' INSTALL_K3S_EXEC='server' sh -s - --disable traefik --disable servicelb --server https://{{ hostvars[groups['potato'][0]]['inventory_hostname'] }}:6443"
+    args:
+      warn: false
+    retries: 3
+    delay: 3
+    register: join_reg
+    until: join_reg.rc == 0
+
+- hosts: potato[0]
+  become: true
+  tasks:
+  - name: wait for nodes to join k3s cluster
+    shell: "while [ `kubectl get nodes | grep Ready | wc -l` -ne {{ groups['potato'] | length }}  ]; do echo waiting; sleep 2s; done"
+
+  - name: get helm3 installer script
+    get_url:
+      url: https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3
+      dest: /root/get-helm-3
+      mode: 0755
+
+  - name: install helm3
+    shell: "/root/get-helm-3"
+
+  - name: copy the operator template
+    template:
+      src: kustomization.yaml
+      dest: /root/
+      mode: 0644
+
+  - name: copy the linstor cluster yaml
+    template:
+      src: linstor_cluster.yaml
+      dest: /root/
+      mode: 0644
+
+  - name: copy the linstor satellite yaml
+    template:
+      src: linstor_satellite.yaml
+      dest: /root/
+      mode: 0644
+
+  - name: copy the linstor storage class yaml
+    template:
+      src: linstor_sc.yaml
+      dest: /root/
+      mode: 0644
+
+  - name: install cert-manager
+    command: "kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml"
+
+  - name: wait for cert-manager to ready
+    command: "kubectl -n cert-manager wait pod --for=condition=Ready --timeout=15m --all"
+
+  - name: apply kustomization yaml
+    command: "kubectl apply -k /root/"
+    tags: linstor
+
+  - name: wait for kustomization to ready
+    command: "kubectl -n linbit-sds wait pod --for=condition=Ready --timeout=15m --all"
+    tags: linstor
+
+  - name: deploy LINSTOR v2 into k8s
+    command: "kubectl create -f /root/linstor_cluster.yaml"
+    tags: linstor
+
+  - name: wait for LINSTOR to become ready
+    command: "kubectl wait pod --for=condition=Ready -n linbit-sds --timeout=45m --all"
+    tags: linstor
+
+  - name: apply LINSTOR satellite config
+    command: "kubectl apply -f /root/linstor_satellite.yaml"
+    tags: linstor
+
+  - name: create linstor storage classes
+    command: kubectl apply -f /root/linstor_sc.yaml
+    tags: linstor

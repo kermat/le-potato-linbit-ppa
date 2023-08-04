@@ -1,0 +1,37 @@
+apiVersion: piraeus.io/v1
+kind: LinstorSatelliteConfiguration
+metadata:
+  name: storage-satellites
+spec:
+  storagePools:
+    - name: lvm-thin
+      lvmThinPool:
+        volumeGroup: drbdpool
+        thinPool: thinpool
+      source:
+        hostDevices:
+          - {{ linstor_storage_pool }}
+---
+apiVersion: piraeus.io/v1
+kind: LinstorSatelliteConfiguration
+metadata:
+  name: compile-drbd-module-loader
+spec:
+  patches:
+    - target:
+        kind: Pod
+        name: satellite
+      patch: |
+        apiVersion: v1
+        kind: Pod
+        metadata:
+          name: satellite
+        spec:
+          initContainers:
+          - name: drbd-module-loader
+            image: drbd9-jammy:v9.2.4
+            platform: linux/arm64-v8
+            env:
+            - name: LB_HOW
+              value: compile
+
